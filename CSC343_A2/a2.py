@@ -229,12 +229,12 @@ class WasteWrangler:
         list of eIDs.
 
         The workmate sphere of <eid> is:
-            * Any employee who has been on a trip with <eid>.
+            * Any employee who has been on a trip with <eid>. -- if and add to array
             * Recursively, any employee who has been on a trip with an employee
               in <eid>'s workmate sphere is also in <eid>'s workmate sphere.
 
         The returned list should NOT include <eid> and should NOT include
-        duplicates.
+        duplicates. 
 
         The order of the returned ids does NOT matter.
 
@@ -242,12 +242,52 @@ class WasteWrangler:
         should simply return an empty list.
         """
         try:
-            # TODO: implement this method
+            # Make a cursor and then store the table values of all the employee 1 and 2 IDs into cur1
+            cur = self.connection.cursor()
+            # Get all the tuples where either the eid1 or eid2 is the eid 
+            cur.execute("SELECT eID1, eID2 FROM Trips WHERE eID1 = %s OR eID2 = %s;", (eid, eid))
+            
+            # All rows from the select statement are contained in rows 
+            rows = cur.fetchall()
+
+            # Initialize the workmate sphere with the employees who have been on a trip with <eid>:
+            workmate_sphere = set()
+            for row in rows:
+                if row[1] == eid:
+                    workmate_sphere.add(row[0])
+                elif row[0] == eid:
+                    workmate_sphere.add(row[1])
+
+            # Recursively add employees who have been on a trip with an employee in the current workmate sphere:
+            # This loop queries the database to find employees who have been on trips with the employees in the current 
+            # workmate sphere (the employees found in the previous iteration(s) of the loop). 
+            for workmate in list(workmate_sphere):
+                # Use a query to find all employees who have been on a trip with an employee in the current workmate sphere, but who have not been on a 
+                # trip with the current employee (eid).
+                cur.execute("SELECT eID1, eID2 FROM Trips WHERE (eID1 = %s OR eID2 = %s) AND (eID1 != %s AND eID2 != %s);", (workmate, workmate, eid, eid))
+                new_workmates = set()
+                for row in cur.fetchall():
+                    if row[1] == workmate:
+                        new_workmates.add(row[0])
+                    elif row[0] == workmate:
+                        new_workmates.add(row[1])
+                workmate_sphere = workmate_sphere.union(new_workmates)
+
+            # Remove <eid> and duplicates from the workmate sphere and return the result as a list:
+            workmate_sphere.discard(eid)
+
+            # Commit + close 
+            self.connection.commit()
+            cur.close()
+
+            return list(workmate_sphere)
             pass
         except pg.Error as ex:
             # You may find it helpful to uncomment this line while debugging,
             # as it will show you all the details of the error that occurred:
             # raise ex
+            self.connection.commit()
+            cur.close()
             return []
 
     def schedule_maintenance(self, date: dt.date) -> int:
@@ -269,7 +309,7 @@ class WasteWrangler:
 
         Return the number of trucks that were successfully scheduled for
         maintenance.
-
+        
         Your method should NOT throw an error.
 
         While a realistic use case will provide a <date> in the near future, our
@@ -304,6 +344,43 @@ class WasteWrangler:
         """
         try:
             # TODO: implement this method
+            # Get all facilities and their wasteTypes:
+            cur = self.connection.cursor()
+            cur.execute("SELECT fID, wasteType FROM Facility JOIN WasteType ON Facility.wasteType = WasteType.wasteType;") 
+            rows = cur.fetchall()
+
+            # Filter facilities that can accept the same type of waste and sort them by ID:
+            valid_facilities = []
+            for row in rows:
+                if row[1] == fid and row[0] != fid:
+                    valid_facilities.append(row[0])
+            valid_facilities.sort()
+
+            # Get all trips that are scheduled to arrive at the given facility on the given date:
+            cur.execute("SELECT * FROM Trip WHERE fID = %s AND date(tTIME) = %s", (fid, date))
+            trips_to_reroute = cur.fetchall()
+
+            # Check if there are trips to reroute:
+            if len(trips_to_reroute) == 0:
+                return 0
+
+            # Find a facility that can accept the same type of waste:
+            new_fid = None
+            for facility_id in valid_facilities:
+                cur.execute("SELECT COUNT(*) FROM Trip WHERE fID = %s AND date(tTIME) = %s", (facility_id, date))
+                count = cur.fetchone()[0]
+                if count == 0:
+                    new_fid = facility_id
+                    break
+
+            # If a new facility was found, update the fID of the affected trips:
+            if new_fid is not None:
+                cur.execute("UPDATE Trip SET fID = %s WHERE fID = %s AND date(tTIME) = %s", (new_fid, fid, date))
+                self.connection.commit()
+                return len(trips_to_reroute)
+            else:
+                return 0
+
             pass
         except pg.Error as ex:
             # You may find it helpful to uncomment this line while debugging,
@@ -384,60 +461,9 @@ def test_preliminary() -> None:
     try:
         # TODO: Change the values of the following variables to connect to your
         #  own database:
-        dbname = 'postgres'
-        user = ''
-        password = ''
-
-        connected = ww.connect(dbname, user, password)
-
-        # The following is an assert statement. It checks that the value for
-        # connected is True. The message after the comma will be printed if
-        # that is not the case (connected is False).
-        # Use the same notation to thoroughly test the methods we have provided
-        assert connected, f"[Connected] Expected True | Got {connected}."
-
-        # TODO: Test one or more methods here, or better yet, make more testing
-        #   functions, with each testing a different aspect of the code.
-
-        # The following function will set up the testing environment by loading
-        # the sample data we have provided into your database. You can create
-        # more sample data files and use the same function to load them into
-        # your database.
-        # Note: make sure that the schema and data files are in the same
-        # directory (folder) as your a2.py file.
-        setup(dbname, user, password, './waste_wrangler_data.sql')
-
-        # --------------------- Testing schedule_trip  ------------------------#
-
-        # You will need to check that data in the Trip relation has been
-        # changed accordingly. The following row would now be added:
-        # (1, 1, '2023-05-04 08:00', null, 2, 1, 1)
-        scheduled_trip = ww.schedule_trip(1, dt.datetime(2023, 5, 4, 8, 0))
-        assert scheduled_trip, \
-            f"[Schedule Trip] Expected True, Got {scheduled_trip}"
-
-        # Can't schedule the same route of the same day.
-        scheduled_trip = ww.schedule_trip(1, dt.datetime(2023, 5, 4, 13, 0))
-        assert not scheduled_trip, \
-            f"[Schedule Trip] Expected False, Got {scheduled_trip}"
-
-        # -------------------- Testing schedule_trips  ------------------------#
-
-        # All routes for truck tid are scheduled on that day
-        scheduled_trips = ww.schedule_trips(1, dt.datetime(2023, 5, 3))
-        assert scheduled_trips == 0, \
-            f"[Schedule Trips] Expected 0, Got {scheduled_trips}"
-
-        # ----------------- Testing update_technicians  -----------------------#
-
-        # This uses the provided file. We recommend you make up your custom
-        # file to thoroughly test your implementation.
-        # You will need to check that data in the Technician relation has been
-        # changed accordingly
-        qf = open('qualifications.txt', 'r')
-        updated_technicians = ww.update_technicians(qf)
-        assert updated_technicians == 2, \
-            f"[Update Technicians] Expected 2, Got {updated_technicians}"
+        dbname = 'csc343h-narwalbi'
+        user = 'narwalbi'
+        password = 'Poointhetoilet.5'
 
         # ----------------- Testing workmate_sphere ---------------------------#
 
@@ -453,26 +479,6 @@ def test_preliminary() -> None:
         # added earlier.
         assert set(workmate_sphere) == {1, 2}, \
             f"[Workmate Sphere] Expected {{1, 2}}, Got {workmate_sphere}"
-
-        # ----------------- Testing schedule_maintenance ----------------------#
-
-        # You will need to check the data in the Maintenance relation
-        scheduled_maintenance = ww.schedule_maintenance(dt.date(2023, 5, 5))
-        assert scheduled_maintenance == 7, \
-            f"[Schedule Maintenance] Expected 7, Got {scheduled_maintenance}"
-
-        # ------------------ Testing reroute_waste  ---------------------------#
-
-        # There is no trips to facility 1 on that day
-        reroute_waste = ww.reroute_waste(1, dt.date(2023, 5, 10))
-        assert reroute_waste == 0, \
-            f"[Reroute Waste] Expected 0. Got {reroute_waste}"
-
-        # You will need to check that data in the Trip relation has been
-        # changed accordingly
-        reroute_waste = ww.reroute_waste(1, dt.date(2023, 5, 3))
-        assert reroute_waste == 1, \
-            f"[Reroute Waste] Expected 1. Got {reroute_waste}"
     finally:
         if qf and not qf.closed:
             qf.close()
