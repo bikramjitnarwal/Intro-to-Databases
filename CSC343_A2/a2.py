@@ -355,40 +355,39 @@ class WasteWrangler:
             # TODO: implement this method
             # Get all facilities and their wasteTypes:
             cur = self.connection.cursor()
-            cur.execute("SELECT fID, wasteType FROM Facility JOIN WasteType ON Facility.wasteType = WasteType.wasteType;") 
+            cur.execute("SELECT fid, wastetype FROM Facility;") 
             rows = cur.fetchall()
 
-            # Filter facilities that can accept the same type of waste and sort them by ID:
-            valid_facilities = []
-            for row in rows:
-                if row[1] == fid and row[0] != fid:
-                    valid_facilities.append(row[0])
-            valid_facilities.sort()
+            # Get the one particular valid waste (same as the waste type from fid)
+            cur.execute("SELECT wastetype FROM Facility WHERE fid = %s;", (fid, ))
+            # Fetch one since you will only get one wasteType
+            validWasteType = cur.fetchone()          
+
+            cur.execute("SELECT fid FROM Facility WHERE wastetype = %s AND fid <> %s ORDER BY fid;", (validWasteType, fid))
+            valid_facilities = [row[0] for row in cur.fetchall()]
 
             # Get all trips that are scheduled to arrive at the given facility on the given date:
-            cur.execute("SELECT * FROM Trip WHERE fID = %s AND date(tTIME) = %s", (fid, date))
+            cur.execute("SELECT * FROM Trip WHERE fID = %s AND date(tTIME) = %s;", (fid, date))
             trips_to_reroute = cur.fetchall()
 
             # Check if there are trips to reroute:
             if len(trips_to_reroute) == 0:
                 return 0
 
-            # Find a facility that can accept the same type of waste:
-            new_fid = None
-            for facility_id in valid_facilities:
-                cur.execute("SELECT COUNT(*) FROM Trip WHERE fID = %s AND date(tTIME) = %s", (facility_id, date))
-                count = cur.fetchone()[0]
-                if count == 0:
-                    new_fid = facility_id
-                    break
+            # Want the first fID (lowest) 
+            nice_facility = valid_facilities[0]
 
-            # If a new facility was found, update the fID of the affected trips:
-            if new_fid is not None:
-                cur.execute("UPDATE Trip SET fID = %s WHERE fID = %s AND date(tTIME) = %s", (new_fid, fid, date))
-                self.connection.commit()
-                return len(trips_to_reroute)
-            else:
-                return 0
+            # Reroute trips to nice_facility
+            count = 0
+            
+            for trip in trips_to_reroute:
+                 rID, tID, tTIME, volume, eID1, eID2, fID = trip
+                 cur.execute("UPDATE TRIP SET fID = %s WHERE rid = %s AND ttime = %s;", (nice_facility, rID, tTIME))
+                 count = count + 1
+            
+            self.connection.commit()
+            cur.close()
+            return count
 
             pass
         except pg.Error as ex:
