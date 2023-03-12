@@ -229,7 +229,7 @@ class WasteWrangler:
         list of eIDs.
 
         The workmate sphere of <eid> is:
-            * Any employee who has been on a trip with <eid>. -- if and add to array
+            * Any employee who has been on a trip with <eid>.
             * Recursively, any employee who has been on a trip with an employee
               in <eid>'s workmate sphere is also in <eid>'s workmate sphere.
 
@@ -245,49 +245,58 @@ class WasteWrangler:
             # Make a cursor and then store the table values of all the employee 1 and 2 IDs into cur1
             cur = self.connection.cursor()
             # Get all the tuples where either the eid1 or eid2 is the eid 
-            cur.execute("SELECT eID1, eID2 FROM Trips WHERE eID1 = %s OR eID2 = %s;", (eid, eid))
+            cur.execute("SELECT eID1, eID2 FROM Trip WHERE eID1 = %s OR eID2 = %s;", (eid, eid))            
             
             # All rows from the select statement are contained in rows 
             rows = cur.fetchall()
-
+            
             # Initialize the workmate sphere with the employees who have been on a trip with <eid>:
-            workmate_sphere = set()
+            sphere = set()
             for row in rows:
                 if row[1] == eid:
-                    workmate_sphere.add(row[0])
+                    sphere.add(row[0])
                 elif row[0] == eid:
-                    workmate_sphere.add(row[1])
+                    sphere.add(row[1])
+
+            if len(sphere) == 0:
+                return []
 
             # Recursively add employees who have been on a trip with an employee in the current workmate sphere:
             # This loop queries the database to find employees who have been on trips with the employees in the current 
             # workmate sphere (the employees found in the previous iteration(s) of the loop). 
-            for workmate in list(workmate_sphere):
-                # Use a query to find all employees who have been on a trip with an employee in the current workmate sphere, but who have not been on a 
+
+            while (1):
+                # Use a query to find all employees who have been on a trip with an employee in the current workmate sphere,
+                # but who have not been on a 
                 # trip with the current employee (eid).
-                cur.execute("SELECT eID1, eID2 FROM Trips WHERE (eID1 = %s OR eID2 = %s) AND (eID1 != %s AND eID2 != %s);", (workmate, workmate, eid, eid))
+                lengthSphere = len(sphere)
+
+                cur.execute("SELECT eID1, eID2 FROM Trip WHERE (eID1 IN %s OR eID2 IN %s);", (tuple(sphere), tuple(sphere)))
                 new_workmates = set()
                 for row in cur.fetchall():
-                    if row[1] == workmate:
+                    if row[1] in sphere:
                         new_workmates.add(row[0])
-                    elif row[0] == workmate:
+                    elif row[0] in sphere:
                         new_workmates.add(row[1])
-                workmate_sphere = workmate_sphere.union(new_workmates)
+                sphere = sphere.union(new_workmates)
+                newLengthSphere = len(sphere)
+
+                if newLengthSphere == lengthSphere:
+                    break
 
             # Remove <eid> and duplicates from the workmate sphere and return the result as a list:
-            workmate_sphere.discard(eid)
+            sphere.discard(eid)
 
             # Commit + close 
             self.connection.commit()
             cur.close()
 
-            return list(workmate_sphere)
-            pass
+            return list(sphere)
         except pg.Error as ex:
             # You may find it helpful to uncomment this line while debugging,
             # as it will show you all the details of the error that occurred:
             # raise ex
-            self.connection.commit()
-            cur.close()
+            print(ex)
             return []
 
     def schedule_maintenance(self, date: dt.date) -> int:
