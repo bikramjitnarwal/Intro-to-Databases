@@ -138,11 +138,154 @@ class WasteWrangler:
         """  
         try:  
             # TODO: implement this method  
+            cur = self.connection.cursor()  
+  
+            #Check if rid exists in route table  
+            cur.execute("Select * from route where rid = %s;", (rid,))  
+            if(cur.rowcount == 0):  
+                return False  
+              
+            #Check if there is already a trip on this route  
+            cur.execute("Select * from trip where rid = %s and date(ttime) = date(%s);", (rid,time))  
+            if(cur.rowcount > 0):  
+                return False  
+  
+            #Gather all static information  
+            
+            #determine end time for trip  
+            cur.execute("Select length from route where rid = %s;",(rid,))  
+            length = cur.fetchone()[0]  
+            end_time = time + dt.timedelta(hours = length/5)   
+  
+  
+            #Checking if start and end time fall between 8am-4pm  
+            if(time.time() < dt.time(8,0,0)):  
+                return False  
+            if(end_time.time() > dt.time(16,0,0) ):  
+                return False  
+  
+  
+            #Find the route's wastetype  
+            cur.execute("Select wastetype from route where rid = %s;", (rid,))  
+            waste_type = cur.fetchone()[0]  
+  
+  
+            #Find all trucks that can go on this route (pick up that wastetype)  
+            cur.execute("Select truck.tid from truck join trucktype on truck.trucktype = trucktype.trucktype where wastetype = '%s';" % (waste_type))  
+            possible_trucks = []  
+              
+            for record in cur:  
+                if(record != None):  
+                    possible_trucks.append(record[0])  
+  
+            #Check if there are any trucks for this wasteypte  
+            if(len(possible_trucks) ==0 ):  
+                return False  
+  
+            # Check which of the possible trucks are available:   
+            available_trucks =[]  
+            for tid in possible_trucks:  
+                #First check if it has maintenance on the same day  
+                cur.execute("Select * from maintenance where tid = %s and mdate = date(%s);", (tid,time))  
+                if(cur.rowcount == 0):  
+  
+                    #Check if this truck has trips on this day  
+                    cur.execute("Select * from trip where tid = %s and date(ttime) = date(%s);", (tid,time))  
+  
+                    if(cur.rowcount == 0):  
+                        available_trucks.append(tid)  
+  
+                    if (cur.rowcount > 0):  
+                          
+                        #Check for those trips if the start time is 30 mins after this scheduling trip is done or if the end time is 30 mins before this trip starts  
+                        for row in cur:  
+                            if (row[2] > end_time + dt.timedelta(hours = 0.5)):  
+                                available_trucks.append(row[1])  
+                              
+                            #if start time is not good we need to check if it ends 30 mins before our wanted trip schd  
+                            cur.execute("Select * from trip join route on trip.rid = route.rid where trip.rid = %s and date(ttime) = date(%s);", (row[0],time))  
+                            trip_info= cur.fetchone()  
+                            trip_length = trip_info[9]  
+                            trip_endtime = trip_info[2] + dt.timedelta(hours = trip_length/5)  
+                            if(trip_endtime < time - dt.timedelta(hours = 0.5)):  
+                                available_trucks.append(row[1])  
+  
+            #Check if there are any available trucks  
+            if (len(available_trucks) ==0):  
+                return False  
+              
+            #Now we have all the trucks that fall within the restrictions find the truck with the largest capacity  
+            cur.execute("Select tid,trucktype,capacity from truck where tid = ANY (%s) order by capacity DESC;", (available_trucks,))  
+            list_of_trucks = cur.fetchall()  
+            best_truck = list_of_trucks[0][0]  
+            best_truck_trucktype = list_of_trucks[0][1]  
+            best_truck_cap = list_of_trucks[0][2]  
+  
+              
+            #Now find all the possible drivers for this trip  
+            cur.execute("Select eid from driver where trucktype = %s;", best_truck_trucktype)  
+            all_possible_first_driver =[]  
+            for record in cur:  
+                all_possible_first_driver.append(record[0])  
+  
+            if(len(all_possible_first_driver) ==0):  
+                return False  
+              
+            #If a driver who can drive this wastetype has a trip on the same day, remove them from list  
+            for driver in all_possible_first_driver:  
+                cur.execute("Select * from trip where (eid1=%s or eid2=%s) and date(ttime) = date(%s);",(driver,driver,time))  
+                if(cur.rowcount > 0):  
+                    any_drivers.remove(driver)  
+            #Get driver who can drive this trucktype and has most experience  
+            cur.execute("Select eid from employee where eid = ANY (%s) order by hiredate,eid;", (all_possible_first_driver,))  
+            dedicated_driver = cur.fetchone()[0]  
+            if(dedicated_driver == None):  
+                return False  
+  
+            # Now find any second driver who has the most experience and no trip on this day  
+            any_drivers=[]  
+            cur.execute("Select distinct eid from driver;")  
+            if(cur.rowcount==0):  
+                return False  
+              
+            for record in cur:  
+                any_drivers.append(record[0])  
+  
+            # Remove any driver who has a trip on given date for scheduling  
+            for driver in any_drivers:  
+                cur.execute("Select * from trip where (eid1=%s or eid2=%s) and date(ttime) = date(%s);",(driver,driver,time))  
+                if(cur.rowcount > 0):  
+                    all_possible_first_driver.remove(driver)  
+  
+            # Select oldest out of these any drivers  
+            cur.execute("Select eid from employee where eid = ANY (%s) order by hiredate,eid;", (any_drivers,))  
+            second_driver = cur.fetchone()[0]  
+            if(second_driver == None):  
+                return False  
+              
+            #Now find a facility for this wastetype  
+            cur.execute("Select fid from facility where wastetype = %s order by fid;", (waste_type,))  
+            facility = cur.fetchone()[0]  
+  
+            #Make sure eid1>eid2  
+            if(dedicated_driver < second_driver):  
+                temp = dedicated_driver  
+                dedicated_driver = second_driver  
+                second_driver = temp  
+                  
+            #Now we have everything to schedule the trip  
+            cur.execute("Insert into trip (rid,tid,ttime,eid1,eid2,fid) values (%s,%s,%s,%s,%s,%s);",(rid,best_truck,time,dedicated_driver,second_driver,facility))  
+              
+            self.connection.commit()  
+            cur.close()  
+  
+            return True  
+  
             pass  
         except pg.Error as ex:  
             # You may find it helpful to uncomment this line while debugging,  
             # as it will show you all the details of the error that occurred:  
-            # raise ex  
+            #raise ex  
             return False  
   
     def schedule_trips(self, tid: int, date: dt.date) -> int:  
@@ -177,8 +320,236 @@ class WasteWrangler:
         While a realistic use case will provide a <date> in the near future, our 
         tests could use any valid value for <date>. 
         """  
-        # TODO: implement this method  
-        pass  
+        try:  
+            # TODO: implement this method  
+            cur = self.connection.cursor()  
+            num_trips_schd = 0  
+            test_id = 2  
+            test_type = 'plastic recycling'  
+            test_length = 20  
+            #Test route  
+            #cur.execute("Insert into route (rid,wastetype,length) values (%s,%s,%s);", (test_id,test_type,test_length))  
+    #1. Find routes not already scheduled for <date>, for which <tid>  
+  
+                #  is able to carry the waste type. Schedule these by ascending  
+  
+                #  order of rIDs.  
+  
+      
+  
+                #   a. Find the routes that are not already scheduled for the given date and for which the truck with the  
+  
+                #  specified ID is capable of carrying the waste type.  
+  
+                #  Once these routes are identified, they are scheduled in ascending order based on their route IDs.  
+  
+      
+  
+                # Find the type of truck  
+  
+            cur.execute("SELECT truckType FROM Truck WHERE tID = %s;", (tid,))  
+  
+            typeOfTruck = cur.fetchone()[0]  
+            if(typeOfTruck == None):  
+                return 0  
+              
+              
+  
+  
+  
+            # For that type of truck, see what kinds of wastes it can hold (e.g: recycling + compost OR only recycling)  
+  
+            cur.execute("SELECT wasteType FROM TruckType WHERE truckType = %s;", (typeOfTruck))  
+            wasteTypeForTruck=[]  
+            for record in cur:  
+                wasteTypeForTruck.append(record[0])  
+            temp= cur.fetchall()  
+            if(temp == None):  
+                return 0  
+              
+              
+  
+  
+  
+            # Get a list of rIDs for routes that are already scheduled for the given date  
+  
+            cur.execute("SELECT rID FROM Trip WHERE date(tTIME) = %s", (date,))  
+  
+            scheduledRids = [row[0] for row in cur.fetchall()]  
+              
+  
+              
+  
+            # Get a list of routes and their attributes  
+  
+            cur.execute("SELECT rID, wasteType, length FROM Route;")  
+  
+            routes = cur.fetchall()  
+              
+  
+              
+  
+            #   b. We would need to have access to a list of routes, each of which would have the following attributes: a unique route ID (rID), a waste type that the route  
+  
+            #  carries (waste_type), and a list of scheduled dates (scheduled_dates).  
+  
+            #  Then need to loop through the list of routes and check if a route is not already scheduled for the given date and if the truck with the specified ID is  
+  
+            #  capable of carrying the waste type for that route. If both conditions are met, the program would schedule the route for the given date and add the date  
+  
+            #  to the list of scheduled dates for that route.  
+  
+  
+  
+            # Loop through the list of routes and check if they are not already scheduled for the given  
+  
+            # date and if the truck with the specified ID is capable of carrying the waste type for that route.  
+  
+            to_be_scheduledRoutes = []  
+  
+            for rID, wasteType, length in routes:  
+  
+                if rID not in scheduledRids and wasteType in wasteTypeForTruck:  
+                      
+                    to_be_scheduledRoutes.append((rID, wasteType, length))  
+  
+                    #cur.execute("INSERT INTO Trip (rID, tID, ttime) VALUES (%s, %s, %s);", (rID, tid, date))  
+  
+                    #should i also do an update? ************************************************************************  
+  
+              
+            #  c. Finally, the scheduled routes would need to be sorted in ascending order based on their route IDs before they are returned as the result of the function.  
+  
+              
+  
+            # Sort the scheduled routes in ascending order based on their route IDs  
+  
+            to_be_scheduledRoutes = sorted(to_be_scheduledRoutes)  
+  
+  
+              
+  
+            if(len(to_be_scheduledRoutes)==0):  
+                return 0  
+  
+            # Have list of rids that do not have a trip on the given date and match the wastetype the given truck can pickup  
+            #rids_to_be_schd = []  
+              
+              
+               
+        #Now find all the possible drivers for this truck  
+            cur.execute("Select eid from driver where trucktype = %s;", typeOfTruck)  
+            all_possible_first_driver =[]  
+            for record in cur:  
+                all_possible_first_driver.append(record[0])  
+              
+  
+            if(len(all_possible_first_driver) ==0):  
+                return 0  
+              
+            #If a driver who can drive this wastetype has a trip on the same day, remove them from list  
+            for driver in all_possible_first_driver:  
+                cur.execute("Select * from trip where (eid1=%s or eid2=%s) and date(ttime) = %s;",(driver,driver,date))  
+                  
+                if(cur.rowcount > 0):  
+                      
+                    all_possible_first_driver.remove(driver)  
+                  
+              
+  
+            #Get driver who can drive this trucktype and has most experience  
+            cur.execute("Select eid from employee where eid = ANY (%s) order by hiredate,eid;", (all_possible_first_driver,))  
+            dedicated_driver = cur.fetchone()[0]  
+              
+            if(dedicated_driver == None):  
+                return False  
+  
+            # Now find any second driver who has the most experience and no trip on this day  
+            any_drivers=[]  
+            cur.execute("Select distinct eid from driver;")  
+            if(cur.rowcount==0):  
+                return 0  
+              
+            for record in cur:  
+                any_drivers.append(record[0])  
+              
+  
+            # Remove any driver who has a trip on given date for scheduling  
+            for driver in any_drivers:  
+                cur.execute("Select * from trip where (eid1=%s or eid2=%s) and date(ttime) = %s;",(driver,driver,date))  
+                  
+                if(cur.rowcount > 0):  
+                    any_drivers.remove(driver)  
+                  
+                      
+  
+            # Select oldest out of these any drivers  
+            cur.execute("Select eid from employee where eid = ANY (%s) order by hiredate,eid;", (any_drivers,))  
+            second_driver = cur.fetchone()[0]  
+              
+            if(second_driver == None):  
+                return 0  
+              
+            #Make sure eid1>eid2  
+            if(dedicated_driver < second_driver):  
+                temp = dedicated_driver  
+                dedicated_driver = second_driver  
+                second_driver = temp  
+                  
+              
+          
+            #we have the drivers for the day and all the routes that the truck can be used for  
+            time_keeper = dt.time(8,0,0) #starts at 8am  
+            time_date_keeper = dt.datetime.combine(date,time_keeper)  
+              
+            for route in to_be_scheduledRoutes:  
+  
+                #find facility for this route (lowest fid)  
+                  
+                cur.execute("Select fid from facility where wastetype = %s order by fid;", (route[1],))  
+                facility = cur.fetchone()[0]  
+                 
+                #Update the time variable to when the next trip can be scheduled  
+                #determine end time for trip  
+                cur.execute("Select length from route where rid = %s;",(route[0],))  
+                length = cur.fetchone()[0]  
+                end_time = time_date_keeper + dt.timedelta(hours = length/5)  
+  
+                if(end_time.time() > dt.time(16,0,0)):  
+                    continue  
+  
+                #Now we have everything to schedule the trip  
+                cur.execute("Insert into trip (rid,tid,ttime,eid1,eid2,fid) values (%s,%s,%s,%s,%s,%s);",(route[0],tid,time_date_keeper,dedicated_driver,second_driver,facility))  
+                num_trips_schd +=1  
+                  
+             
+  
+                #add the 30 mins buffer  
+                time_date_keeper = end_time + dt.timedelta(hours = 0.5)   
+                  
+                if(time_date_keeper.time() > dt.time(16,0,0)):  
+                    break  
+             
+             
+             
+             
+              
+  
+  
+  
+  
+              
+  
+  
+            self.connection.commit()  
+            cur.close()  
+            return num_trips_schd  
+            pass  
+        except pg.Error as ex:  
+            # You may find it helpful to uncomment this line while debugging,  
+            # as it will show you all the details of the error that occurred:  
+            #raise ex  
+            return 0  
   
     def update_technicians(self, qualifications_file: TextIO) -> int:  
         """Given the open file <qualifications_file> that follows the format 
@@ -211,12 +582,10 @@ class WasteWrangler:
               
             num_successful_changes = 0  
             for info in technician_data:  
-                print(info)  
                 #if(len(info) == 3):  
                 firstname =  info[0]  
                 surname = info[1]  
                 fullname = str(firstname + " " + surname)  
-                print(fullname)  
                 truck_type = info[2]  
                 eid = -1  
                 '''if(len(info) == 4): 
@@ -228,45 +597,32 @@ class WasteWrangler:
                 cur.execute("Select eid from employee where name = '%s';" % (fullname))  
                 row = cur.fetchone()  
                 if ( row == None):  
-                    print("No employee with that name")  
                     continue  
                       
                 else:  
                     eid = row  
-                    print("There is an employee with that name")  
   
                 # Check if the given trucktype is a valid trucktype  
                 cur.execute("Select * from trucktype where trucktype = %s;", truck_type)  
                 row1 = cur.fetchone()  
                 if (row1 == None):  
-                    print("truck type does not exist")  
                     continue  
-  
-                print("trucktype exists")  
   
                 # Check if the given employee is a driver  
                 cur.execute("Select * from driver where eid = %s;", eid)  
                 row2 = cur.fetchone()  
                 if(row2 !=None):  
-                    print("they are a driver")  
                     continue  
                   
-                print("they are not a driver")  
-  
                 # Check if the current technician is already qualified to do maintenance on that truck type  
                 cur.execute("Select * from technician where eid = %s and trucktype = %s;", (eid, truck_type))  
                 row3 = cur.fetchone()  
                 if (row3 !=None):  
-                    print("the technician already does that kind of truck")  
                     continue  
                   
-                print("technician does not do that kind of truck")  
-  
                 # If it passed all above cases then we can insert new entry into technician table and increase count for number of successful changes  
                 cur.execute("INSERT INTO technician VALUES (%s,%s);", (eid, truck_type))  
-                print ("inserted new technician")  
                 num_successful_changes +=1  
-                print(num_successful_changes)  
                   
             self.connection.commit()  
             cur.close()  
@@ -422,7 +778,7 @@ class WasteWrangler:
   
             # raise ex  
   
-            print(ex)  
+              
   
             return []  
   
@@ -454,32 +810,21 @@ class WasteWrangler:
         try:  
             cur = self.connection.cursor()  
             count = 0  
-            print(date)  
             list_90days = []  
             list_10days_future = []  
             # All trucks who did not have maintenance in the last 90 days compared to the given date HAVW To FIX DATE THING  
             cur.execute("Select * from maintenance where mdate < date(%s) - interval '90 days';", (date,))  
             for record in cur:  
-                if record == 0:  
-                    print("no record")  
                 list_90days.append(record[0])  
-  
-            print(list_90days)  
   
             # All trucks who have maintenace in the next 10 days  
             cur.execute("Select * from maintenance where mdate > date(%s) + interval '10 days';", (date,))  
             for record in cur:  
-                if record ==0:  
-                    print("no record")  
                 list_10days_future.append(record[0])  
   
-            print(list_10days_future)  
   
             need_maintenance = set(list_90days) - set(list_10days_future)  
             need_maintenance =  sorted(need_maintenance)  
-            print("these trucks need maintenanc: ", need_maintenance)  
-              
-              
               
             for truck in need_maintenance:  
                 i = 0   
@@ -487,17 +832,12 @@ class WasteWrangler:
                 while (isvalid == False):  
                     i+=1  
                     next_day = date + dt.timedelta(days=i)  
-                    print(next_day)  
-                    print(truck)  
                     cur.execute("Select * From trip where tid = %s and date(ttime) = %s;",(truck,next_day))  
                      
                     if(cur.rowcount == 0):  
-                        print("there is no trip today)")  
                           
                         cur.execute("Select trucktype from truck where tid = %s;", (truck,))  
                         truck_type = cur.fetchone()  
-                        print(truck_type)  
-                        print(truck_type[0])  
                           
                         # Find technicians who can work on this truck  
                         technicians = []  
@@ -505,15 +845,10 @@ class WasteWrangler:
                         technicians = cur.fetchall()  
                         technicians.sort()  
                           
-                        print(technicians)  
   
                         for tech in technicians:  
-                            print(tech[0])  
-                            print(next_day)  
                             cur.execute("Select * from maintenance where eid = %s and mdate = %s;", (tech[0],next_day))  
-                            print("i did the query")  
                             if(cur.rowcount == 0):  
-                                print("I found a day with an available technician and the tech is:",tech[0])  
                                 cur.execute("Insert into maintenance values (%s,%s,%s);", (truck,tech[0],next_day))  
                                 count +=1  
                                 isvalid = True  
@@ -772,7 +1107,6 @@ def test_preliminary() -> None:
         assert scheduled_trips == 0, \  
             f"[Schedule Trips] Expected 0, Got {scheduled_trips}"   
               
-          
   
         # ----------------- Testing update_technicians  -----------------------#  
   
